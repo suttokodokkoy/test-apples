@@ -1,1 +1,243 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>リンゴのインタラクティブ・キャンバス</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* 選択防止とカーソル設定 */
+    body {
+      user-select: none;
+      -webkit-user-select: none;
+      overflow: hidden;
+      background-color: #f8fafc; /* 薄いグレーの背景 */
+    }
+    .apple-container {
+      position: absolute;
+      /* ブラウザ幅の8% */
+      width: 8vw;
+      height: 8vw;
+      /* 最小サイズと最大サイズを設定して極端なサイズ変化を防ぐ */
+      min-width: 60px;
+      min-height: 60px;
+      max-width: 150px;
+      max-height: 150px;
+      cursor: grab;
+      transform: translate(-50%, -50%);
+      touch-action: none; /* モバイルでのデフォルトスクロールを防止 */
+      filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.1));
+      transition: filter 0.1s ease;
+    }
+    .apple-container:active {
+      cursor: grabbing;
+      filter: drop-shadow(0 10px 15px rgba(0, 0, 0, 0.15));
+    }
+  </style>
+</head>
+<body class="w-screen h-screen relative">
 
+  <!-- 操作ガイド説明（UIを邪魔しないように薄く表示） -->
+  <div class="absolute top-6 left-6 z-10 bg-white/80 backdrop-blur-md p-4 rounded-xl border border-slate-200 pointer-events-none max-w-xs shadow-sm">
+    <h1 class="text-lg font-bold text-slate-800 mb-1">🍎 リンゴのキャンバス</h1>
+    <p class="text-xs text-slate-500 leading-relaxed">
+      ・<span class="font-semibold text-rose-500">背景をクリック</span>：リンゴを新しく追加<br>
+      ・<span class="font-semibold text-rose-500">リンゴをドラッグ</span>：好きな場所に移動<br>
+      ・<span class="font-semibold text-rose-500">リンゴをクリック</span>：そのリンゴを消去
+    </p>
+  </div>
+
+  <!-- リンゴを追加するための全体背景エリア -->
+  <div id="canvas" class="w-full h-full absolute inset-0"></div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+
+    // アップロードされたリンゴの画像を忠実にインラインSVGで再現
+    const appleSvgContent = `
+      <svg viewBox="0 0 100 100" class="w-full h-full">
+        <!-- 赤い実の部分（黒い太枠付き、下部に少しへこみを持たせた円形に近いパス、または円） -->
+        <circle cx="50" cy="55" r="38" fill="#E36B69" stroke="#000000" stroke-width="6" />
+        
+        <!-- ヘタ（枝）の部分（黒い太い直線） -->
+        <line x1="57" y1="10" x2="50" y2="35" stroke="#000000" stroke-width="6" stroke-linecap="round" />
+        
+        <!-- ヘタの根元のくぼみ（黒いV字/U字カーブ） -->
+        <path d="M 42 32 C 45 36, 48 40, 50 40 C 52 40, 56 36, 61 32" fill="none" stroke="#000000" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    `;
+
+    // 背景をクリックしたときにリンゴを作成
+    canvas.addEventListener('click', (e) => {
+      // クリックターゲットが背景（canvas）そのものである場合のみ処理
+      if (e.target !== canvas) return;
+
+      createApple(e.clientX, e.clientY);
+    });
+
+    // モバイルのタッチ操作による背景タップもサポート
+    canvas.addEventListener('touchend', (e) => {
+      if (e.target !== canvas) return;
+      // タッチイベントから座標を取得
+      if (e.changedTouches && e.changedTouches.length > 0) {
+        const touch = e.changedTouches[0];
+        createApple(touch.clientX, touch.clientY);
+      }
+    });
+
+    // リンゴを生成する関数
+    function createApple(x, y) {
+      const apple = document.createElement('div');
+      apple.className = 'apple-container';
+      apple.innerHTML = appleSvgContent;
+
+      // 初期位置を設定（数値ならpx、文字列なら%やvw等の単位をそのまま適用）
+      apple.style.left = typeof x === 'number' ? `${x}px` : x;
+      apple.style.top = typeof y === 'number' ? `${y}px` : y;
+
+      // ドラッグおよびクリック判定のための変数
+      let isDragging = false;
+      let startX = 0;
+      let startY = 0;
+      let initialLeft = 0;
+      let initialTop = 0;
+      let hasMoved = false; // マウスポインタが動いたかどうかのフラグ
+
+      // --- マウス・タッチイベントの共通処理関数 ---
+
+      function onStart(clientX, clientY) {
+        isDragging = true;
+        hasMoved = false; // 初期状態は「動いていない」
+
+        startX = clientX;
+        startY = clientY;
+
+        // getBoundingClientRectを使って、画面上の現在の絶対ピクセル位置を取得
+        // これにより、初期配置が「50%」などの相対指定であっても確実に実数pxに変換され、ドラッグ計算がズレなくなります
+        const rect = apple.getBoundingClientRect();
+        
+        // apple-containerはCSSで transform: translate(-50%, -50%) されているため、
+        // 算出されたrectのビジュアル上の中心点が、元のleft, top（基準点）と完全に一致します
+        const currentLeft = rect.left + rect.width / 2;
+        const currentTop = rect.top + rect.height / 2;
+
+        // ピクセル値で固定し直す
+        apple.style.left = `${currentLeft}px`;
+        apple.style.top = `${currentTop}px`;
+
+        initialLeft = currentLeft;
+        initialTop = currentTop;
+      }
+
+      function onMove(clientX, clientY) {
+        if (!isDragging) return;
+
+        const dx = clientX - startX;
+        const dy = clientY - startY;
+
+        // わずかでも動いたら「移動中（ドラッグ）」とみなし、クリック消去を防ぐ
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+          hasMoved = true;
+        }
+
+        if (hasMoved) {
+          // ドラッグ移動先の座標を計算
+          let newLeft = initialLeft + dx;
+          let newTop = initialTop + dy;
+
+          // 画面外に完全に飛び出さないように制限
+          const minX = 0;
+          const maxX = window.innerWidth;
+          const minY = 0;
+          const maxY = window.innerHeight;
+
+          newLeft = Math.max(minX, Math.min(maxX, newLeft));
+          newTop = Math.max(minY, Math.min(maxY, newTop));
+
+          apple.style.left = `${newLeft}px`;
+          apple.style.top = `${newTop}px`;
+        }
+      }
+
+      function onEnd() {
+        if (!isDragging) return;
+        isDragging = false;
+
+        // 【最重要】マウスポインタが「動かずに」ボタンがアップされた（クリックされた）場合のみ消去
+        if (!hasMoved) {
+          // ふわっと消えるアニメーション
+          apple.style.transition = 'transform 0.15s ease, opacity 0.15s ease';
+          apple.style.transform = 'translate(-50%, -50%) scale(0)';
+          apple.style.opacity = '0';
+          setTimeout(() => {
+            apple.remove();
+          }, 150);
+        }
+      }
+
+      // --- マウスイベントのバインド ---
+      apple.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // テキスト選択などを防止
+        onStart(e.clientX, e.clientY);
+
+        // マウスが急激に動いても追従できるように、document全体で移動とアップを監視
+        const onMouseMove = (moveEvent) => {
+          onMove(moveEvent.clientX, moveEvent.clientY);
+        };
+
+        const onMouseUp = () => {
+          onEnd();
+          document.removeEventListener('mousemove', onMouseMove);
+          document.removeEventListener('mouseup', onMouseUp);
+        };
+
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+      });
+
+      // --- タッチイベント（スマホ・タブレット対応）のバインド ---
+      apple.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) {
+          const touch = e.touches[0];
+          onStart(touch.clientX, touch.clientY);
+        }
+      }, { passive: true });
+
+      apple.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 1) {
+          const touch = e.touches[0];
+          onMove(touch.clientX, touch.clientY);
+        }
+      }, { passive: true });
+
+      apple.addEventListener('touchend', () => {
+        onEnd();
+      });
+
+      // キャンバスにリンゴを追加
+      canvas.appendChild(apple);
+
+      // 出現時のポップアップアニメーション
+      apple.style.transform = 'translate(-50%, -50%) scale(0)';
+      requestAnimationFrame(() => {
+        apple.style.transition = 'transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1)';
+        apple.style.transform = 'translate(-50%, -50%) scale(1)';
+        // アニメーション完了後にtransitionをクリア（ドラッグ中の引っかかりを防止するため）
+        setTimeout(() => {
+          apple.style.transition = 'none';
+        }, 250);
+      });
+    }
+
+    // 初回ロード時に確実に中央に1つだけ表示
+    function initDefaultApple() {
+      // 50%指定にすることで、どのような解像度や描画開始タイミングでもブレずに絶対的な中央になります
+      createApple('50%', '50%');
+    }
+
+    // 読み込み直後に即時実行
+    initDefaultApple();
+  </script>
+</body>
+</html>
